@@ -130,3 +130,25 @@ dmypy.json
 
 # Mac system folder
 .DS_Store
+
+# Project-specific output directories
+ukraine_output/
+ukraine_results/
+*_output/
+*_results/
+temp_raster/
+temp_vector/
+
+# Temporary processing files
+*.png.aux.xml
+*_GCP_Points.json
+
+# GIS temporary files
+*.cpg
+*.shx
+*.prj
+*.qpj
+
+# Large data files (exclude from version control)
+*.tif
+*.geotiff
