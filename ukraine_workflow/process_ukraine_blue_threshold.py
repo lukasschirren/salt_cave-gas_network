@@ -10,14 +10,12 @@ import json
 import cv2
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans
 from pathlib import Path
 from osgeo import gdal, osr
 import geopandas as gpd
 import rasterio
 import rasterio.features
 from shapely.geometry import shape, mapping
-from shapely.geometry.polygon import Polygon
 from shapely.geometry.multipolygon import MultiPolygon
 import fiona
 
@@ -41,12 +39,13 @@ def load_ukraine_gcps(gcp_file_path):
 
 
 def extract_blue_threshold(image_path, threshold=10, 
-                          blue_colors=[[180, 200, 255], [120, 160, 255], [80, 120, 255], [40, 80, 255]],
-                          capacities=[100, 200, 300, 400],
+                          blue_colors=[[100, 150, 255]],  # Single blue color for detection
+                          capacities=[400],  # Single capacity value: 400 kWh/m³
                           background_color=[226, 226, 226],
-                          total_twh=None):
+                          total_twh=None,
+                          ukraine_gcps=None):
     """
-    Extract blue salt cavern areas using threshold detection
+    Extract blue salt cavern areas using threshold detection with single capacity value
     
     Parameters:
     -----------
@@ -55,13 +54,15 @@ def extract_blue_threshold(image_path, threshold=10,
     threshold : float
         Variance threshold to filter background pixels
     blue_colors : list
-        RGB values for different blue shades (light to dark)
+        RGB values for blue detection (single color for all salt caverns)
     capacities : list
-        Capacity values (kWh/m³) corresponding to each blue shade
+        Single capacity value (400 kWh/m³) for all detected salt caverns
     background_color : list
         RGB value of background color [226, 226, 226]
     total_twh : float
         Total TWh capacity for Ukraine (if provided, will calculate density)
+    ukraine_gcps : list
+        Ground Control Points for creating Ukraine boundary mask
     
     Returns:
     --------
@@ -80,6 +81,12 @@ def extract_blue_threshold(image_path, threshold=10,
     img_list = img.reshape((-1, 3))
     img_df = pd.DataFrame(img_list, columns=['R', 'G', 'B'])
     
+    # Create Ukraine boundary mask to limit detection to Ukraine territory only
+    # Boundary masking disabled - works better without it, combination script handles geographic accuracy
+    print("⚠️  Ukraine boundary masking disabled - processing entire image")
+    ukraine_mask = np.ones(len(img_df), dtype=bool)
+    print(f"Processing entire image: {len(ukraine_mask):,} pixels")
+    
     # Calculate variance for each pixel to identify background
     img_df['variance'] = img_df.var(axis=1)
     
@@ -94,12 +101,21 @@ def extract_blue_threshold(image_path, threshold=10,
     print(f"Background pixels: {background_mask.sum()} ({background_mask.sum()/len(img_df)*100:.1f}%)")
     print(f"Non-background pixels: {(~background_mask).sum()} ({(~background_mask).sum()/len(img_df)*100:.1f}%)")
     
-    # Focus on blue pixels only (high blue channel, lower red/green)
+    # Focus on blue pixels only (targeting blue range: RGB(71,72,199) to RGB(55,59,192)) AND within Ukraine
+    blue_r_min, blue_r_max = 30, 100    # Red channel range
+    blue_g_min, blue_g_max = 30, 110    # Green channel range  
+    blue_b_min, blue_b_max = 120, 230  # Blue channel range
     blue_mask = (
+        ukraine_mask &                      # ONLY within Ukraine boundaries
         (~background_mask) &
-        (img_df['B'] > img_df['R']) &
-        (img_df['B'] > img_df['G']) &
-        (img_df['B'] > 100)  # Minimum blue value
+        (img_df['R'] >= blue_r_min) &       # Red channel within range (55-71)
+        (img_df['R'] <= blue_r_max) &
+        (img_df['G'] >= blue_g_min) &       # Green channel within range (59-72)
+        (img_df['G'] <= blue_g_max) &
+        (img_df['B'] >= blue_b_min) &       # Blue channel within range (192-199)
+        (img_df['B'] <= blue_b_max) &
+        (img_df['B'] > img_df['R'] + 50) &  # Blue strongly dominant over red
+        (img_df['B'] > img_df['G'] + 50)    # Blue strongly dominant over green
     )
     
     print(f"Blue pixels: {blue_mask.sum()} ({blue_mask.sum()/len(img_df)*100:.1f}%)")
@@ -127,16 +143,12 @@ def extract_blue_threshold(image_path, threshold=10,
         
         img_df.loc[blue_mask, 'predict'] = predictions
     
-    # If total TWh is provided, calculate density based on total area
+    # If total TWh is provided, show basic statistics
     if total_twh is not None:
         total_blue_pixels = blue_mask.sum()
-        total_area_m2 = total_blue_pixels * (1000 ** 2)  # Rough estimate, adjust based on image resolution
-        average_density = (total_twh * 1e12) / total_area_m2  # Convert TWh to Wh, then to Wh/m²
-        
-        # Distribute density across blue categories (darker = higher density)
-        base_density = average_density * 0.5
-        capacities = [base_density * (i + 1) for i in range(n_clusters)]
-        print(f"Calculated capacities based on {total_twh} TWh total: {capacities}")
+        print(f"Total blue pixels detected: {total_blue_pixels:,}")
+        print(f"Expected total capacity: {total_twh} TWh")
+        print(f"(Detailed validation will be performed in combine_with_eu.py)")
     
     # Generate processed layers
     layers = {}
@@ -260,6 +272,89 @@ def raster2shp(input_path, output_path, capacity, background=255):
             })
 
 
+def create_ukraine_boundary_mask(img_shape, gcps, ukraine_boundary_path=None):
+    """
+    Create a mask for Ukraine's boundaries to limit salt cavern detection to Ukraine territory only
+    """
+    
+    if ukraine_boundary_path is None:
+        # Use default Ukraine boundary file
+        ukraine_boundary_path = Path(__file__).parent / "UA_shape_file" / "world-administrative-boundaries.shp"
+    
+    if not Path(ukraine_boundary_path).exists():
+        print(f"⚠️  Ukraine boundary file not found: {ukraine_boundary_path}")
+        print("   Proceeding without boundary mask (will process entire image)")
+        return np.ones((img_shape[0], img_shape[1]), dtype=bool)
+    
+    try:
+        # Load Ukraine boundary
+        ukraine_gdf = gpd.read_file(ukraine_boundary_path)
+        
+        # Find Ukraine
+        country_columns = ['NAME', 'COUNTRY', 'name', 'country', 'NAME_EN', 'ADMIN']
+        ukraine_filter = None
+        
+        for col in country_columns:
+            if col in ukraine_gdf.columns:
+                ukraine_mask_col = ukraine_gdf[col].str.contains('Ukraine', case=False, na=False)
+                if ukraine_mask_col.any():
+                    ukraine_filter = ukraine_mask_col
+                    print(f"✓ Found Ukraine using column '{col}'")
+                    break
+        
+        if ukraine_filter is not None:
+            ukraine_gdf = ukraine_gdf[ukraine_filter]
+        else:
+            print("⚠️  Could not identify Ukraine in boundary file, using first geometry")
+            ukraine_gdf = ukraine_gdf.head(1)
+        
+        if ukraine_gdf.empty:
+            print("⚠️  No Ukraine boundary found in shapefile")
+            return np.ones((img_shape[0], img_shape[1]), dtype=bool)
+        
+        print(f"✓ Loaded Ukraine boundary")
+        
+        # Calculate image bounds from GCPs
+        gcp_lons = [gcp.GCPX for gcp in gcps]
+        gcp_lats = [gcp.GCPY for gcp in gcps]
+        
+        min_lon, max_lon = min(gcp_lons), max(gcp_lons)
+        min_lat, max_lat = min(gcp_lats), max(gcp_lats)
+        
+        # Add some padding
+        lon_pad = (max_lon - min_lon) * 0.1
+        lat_pad = (max_lat - min_lat) * 0.1
+        
+        bounds = (min_lon - lon_pad, min_lat - lat_pad, max_lon + lon_pad, max_lat + lat_pad)
+        
+        # Create transform for rasterizing
+        img_height, img_width = img_shape[:2]
+        from rasterio.transform import from_bounds
+        transform = from_bounds(*bounds, img_width, img_height)
+        
+        # Rasterize Ukraine boundary to create mask
+        from rasterio.features import rasterize
+        ukraine_geometries = ukraine_gdf.geometry.tolist()
+        mask = rasterize(
+            ukraine_geometries,
+            out_shape=(img_height, img_width),
+            transform=transform,
+            fill=0,
+            default_value=1,
+            dtype='uint8'
+        )
+        
+        mask_percentage = (mask.sum() / mask.size) * 100
+        print(f"✓ Created Ukraine boundary mask: {mask_percentage:.1f}% of image is within Ukraine")
+        
+        return mask.astype(bool)
+        
+    except Exception as e:
+        print(f"⚠️  Error creating Ukraine boundary mask: {e}")
+        print("   Proceeding without boundary mask")
+        return np.ones((img_shape[0], img_shape[1]), dtype=bool)
+
+
 def process_ukraine_salt_caverns(image_path, gcp_file_path, output_dir, total_twh=None):
     """
     Main processing function for Ukraine salt caverns
@@ -273,7 +368,8 @@ def process_ukraine_salt_caverns(image_path, gcp_file_path, output_dir, total_tw
     output_dir : str
         Output directory for results
     total_twh : float, optional
-        Total TWh capacity for Ukraine
+        Total TWh capacity for Ukraine (89.8 TWh) - used for validation only,
+        does not override the fixed 400 kWh/m³ density
     """
     
     # Setup paths
@@ -300,13 +396,15 @@ def process_ukraine_salt_caverns(image_path, gcp_file_path, output_dir, total_tw
     gcps = load_ukraine_gcps(gcp_file_path)
     
     # Extract blue threshold layers
-    print("\n--- Extracting Blue Threshold Layers ---")
+    print("\n--- Extracting Blue Threshold Layers (Single Capacity: 400 kWh/m³) ---")
     result = extract_blue_threshold(
         image_path, 
         threshold=15,  # Adjusted for Ukraine image
-        blue_colors=[[180, 200, 255], [120, 160, 255], [80, 120, 255], [40, 80, 255]],
+        blue_colors=[[100, 150, 255]],  # Single blue color for all salt caverns
+        capacities=[400],  # Single capacity: 400 kWh/m³
         background_color=[226, 226, 226],
-        total_twh=total_twh
+        total_twh=total_twh,
+        ukraine_gcps=gcps  # Pass GCPs for boundary mask creation
     )
     
     if result is None:
@@ -393,8 +491,16 @@ def main():
     """Main function with user input"""
     print("=== Ukraine Salt Cavern Blue Threshold Processor ===")
     
+    # Default image path
+    default_image_path = r"C:\Users\ls2823\OneDrive - Imperial College London\0_PHD\Repositories\salt_cave-gas_network\gas_network_exploring\salt_cave\original\salt_cave_ua.jpg"
+    
     # Get input parameters
-    image_path = input("Enter path to Ukraine salt cavern image: ").strip().strip('"')
+    image_input = input(f"Enter path to Ukraine salt cavern image (or press Enter for default): ").strip().strip('"')
+    if not image_input:
+        image_path = default_image_path
+        print(f"Using default image: {image_path}")
+    else:
+        image_path = image_input
     
     # Try to find GCP file automatically
     image_dir = Path(image_path).parent
@@ -410,7 +516,7 @@ def main():
     if not output_dir:
         output_dir = "ukraine_results"
     
-    total_twh_input = input("Enter total TWh for Ukraine (or press Enter to use default capacities): ").strip()
+    total_twh_input = input("Enter total TWh for Ukraine (89.8 TWh for validation, or press Enter to skip): ").strip()
     total_twh = float(total_twh_input) if total_twh_input else None
     
     try:

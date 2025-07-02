@@ -152,3 +152,9 @@ temp_vector/
 # Large data files (exclude from version control)
 *.tif
 *.geotiff
+ukraine_workflow/UA_shape_file/world-administrative-boundaries.dbf
+ukraine_workflow/UA_shape_file/world-administrative-boundaries.shp
+salt_cave/final_with_ukraine_4419.dbf
+salt_cave/final_with_ukraine_4419.shp
+salt_cave/final_with_ukraine.dbf
+salt_cave/final_with_ukraine.shp
