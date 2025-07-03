@@ -102,8 +102,8 @@ def extract_blue_threshold(image_path, threshold=10,
     print(f"Non-background pixels: {(~background_mask).sum()} ({(~background_mask).sum()/len(img_df)*100:.1f}%)")
     
     # Focus on blue pixels only (targeting blue range: RGB(71,72,199) to RGB(55,59,192)) AND within Ukraine
-    blue_r_min, blue_r_max = 30, 100    # Red channel range
-    blue_g_min, blue_g_max = 30, 110    # Green channel range  
+    blue_r_min, blue_r_max = 50, 100    # Red channel range
+    blue_g_min, blue_g_max = 50, 100    # Green channel range  
     blue_b_min, blue_b_max = 120, 230  # Blue channel range
     blue_mask = (
         ukraine_mask &                      # ONLY within Ukraine boundaries

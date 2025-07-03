@@ -122,7 +122,7 @@ def combine_ukraine_with_eu(ukraine_shp_path, eu_shp_path, output_path, ukraine_
     ukraine_gdf = ukraine_clipped
     
     # Validate Ukraine capacity against expected total (89.8 TWh)
-    validation_results = validate_ukraine_capacity(ukraine_gdf, total_twh=89.8)
+    validation_results = validate_ukraine_capacity(ukraine_gdf, total_twh=169)
     
     # Ensure columns match - preserve the original EU structure
     ukraine_cols = set(ukraine_gdf.columns)
